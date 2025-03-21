@@ -1,0 +1,39 @@
+# Ignore node_modules directory
+node_modules/
+
+# Ignore environment variables
+.env
+
+# Ignore logs and debug files
+*.log
+*.pid
+*.seed
+*.pid.lock
+
+# Ignore Puppeteer local Chromium downloads
+.local-chromium/
+
+# Ignore IDE-specific files
+.vscode/
+.idea/
+
+# Ignore OS-specific files
+.DS_Store
+Thumbs.db
+
+# Ignore media and state files (if you don't want to track them)
+media-urls/
+crawler-state.json
+
+# Ignore npm/yarn cache
+.npm
+.yarn
+.yarn-cache
+
+# Ignore build artifacts
+dist/
+build/
+out/
+
+# Ignore package-lock.json
+package-lock.json
