@@ -2,14 +2,14 @@ require("dotenv").config(); // Load .env file
 const fs = require("fs").promises;
 const path = require("path");
 const puppeteer = require("puppeteer");
+const sqlite3 = require("sqlite3").verbose(); // SQLite3 for database
 
 // Configuration from .env
 const START_URL = process.env.START_URL;
 const MAX_CONCURRENT_PAGES = parseInt(process.env.MAX_CONCURRENT_PAGES, 10);
 const CRAWL_DELAY = parseInt(process.env.CRAWL_DELAY, 10);
 const SAVE_INTERVAL = parseInt(process.env.SAVE_INTERVAL, 10);
-const MEDIA_DIR = path.resolve(__dirname, process.env.MEDIA_DIR);
-const STATE_FILE = path.resolve(__dirname, process.env.STATE_FILE);
+const DB_FILE = path.resolve(__dirname, process.env.DB_FILE || "crawler.db");
 
 // State management
 let visitedUrls = new Set();
@@ -18,24 +18,79 @@ let activeTasks = 0;
 let saveTimeout;
 
 // Media patterns
-const VIDEO_EXTENSIONS =
-  /\.(mp4|mov|avi|mkv|webm|flv|wmv|mpeg|mpg|3gp)(\?.*)?$/i;
-const IMAGE_EXTENSIONS = /\.(jpg|jpeg|png|gif|bmp|webp|svg|tiff)(\?.*)?$/i;
+const VIDEO_EXTENSIONS = /\.(mp4|mkv)(\?.*)?$/i;
+const IMAGE_EXTENSIONS = /\.(jpg|jpeg|png)(\?.*)?$/i;
+
+// Initialize SQLite database
+// In database connection handler
+const db = new sqlite3.Database(
+  DB_FILE,
+  sqlite3.OPEN_READWRITE | sqlite3.OPEN_CREATE,
+  (err) => {
+    if (err) {
+      console.error("Error opening database:", err.message);
+      console.log("Full path:", DB_FILE); // Add this for debugging
+    } else {
+      console.log("Connected to SQLite database");
+      initializeDatabase();
+    }
+  }
+);
+
+// Create tables if they don't exist
+function initializeDatabase() {
+  db.serialize(() => {
+    db.run(
+      `
+      CREATE TABLE IF NOT EXISTS pages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL UNIQUE
+      )
+    `,
+      (result, err) => {
+        console.log("Created pages table", result, err);
+      }
+    );
+
+    db.run(
+      `
+     CREATE TABLE IF NOT EXISTS media (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    page_id INTEGER NOT NULL,
+    url TEXT NOT NULL,
+    type TEXT NOT NULL,
+    season TEXT,
+    episode TEXT,
+    resolution TEXT,
+    FOREIGN KEY (page_id) REFERENCES pages(id)
+  )
+    `,
+      (result, err) => {
+        console.log("Created media table", result, err);
+      }
+    );
+    db.run("CREATE INDEX IF NOT EXISTS idx_media_page_id ON media(page_id)");
+    db.run("CREATE INDEX IF NOT EXISTS idx_pages_name ON pages(name)");
+  });
+}
 
 // Ensure media directory exists
 async function ensureMediaDir() {
   try {
-    await fs.mkdir(MEDIA_DIR, { recursive: true });
-    console.log(`Media directory created at: ${MEDIA_DIR}`);
+    await fs.mkdir(path.dirname(DB_FILE), { recursive: true });
+    console.log(`Database directory created at: ${path.dirname(DB_FILE)}`);
   } catch (error) {
-    console.error("Error creating media directory:", error.message);
+    console.error("Error creating database directory:", error.message);
   }
 }
 
 // Load crawler state from file
 async function loadState() {
   try {
-    const data = await fs.readFile(STATE_FILE, "utf8");
+    const data = await fs.readFile(
+      path.resolve(__dirname, "crawler-state.json"),
+      "utf8"
+    );
     const state = JSON.parse(data);
     visitedUrls = new Set(state.visitedUrls);
     queue = state.queue;
@@ -58,7 +113,10 @@ async function saveState() {
       visitedUrls: Array.from(visitedUrls),
       queue: queue,
     };
-    await fs.writeFile(STATE_FILE, JSON.stringify(state, null, 2));
+    await fs.writeFile(
+      path.resolve(__dirname, "crawler-state.json"),
+      JSON.stringify(state, null, 2)
+    );
     console.log(
       `Saved state: ${visitedUrls.size} visited URLs, ${queue.length} URLs in queue`
     );
@@ -67,22 +125,100 @@ async function saveState() {
   }
 }
 
-// Save media URLs for a specific page
+// Save page and media URLs to SQLite database
 async function savePageMediaUrls(pageUrl, mediaUrls) {
-  try {
-    if (!mediaUrls.some((url) => url.endsWith(".mkv"))) return;
-    mediaUrls = mediaUrls.filter((url) => !url.endsWith("logo40.png"));
-    const fileName = pageUrl.split("/").pop() || "index"; // Use last part of URL as file name
-    const filePath = path.resolve(MEDIA_DIR, `${fileName}.txt`);
-    await fs.writeFile(filePath, mediaUrls.join("\n"));
-    console.log(
-      `Saved ${mediaUrls.length} media URLs for ${pageUrl} to ${filePath}`
-    );
-  } catch (error) {
-    console.error(`Error saving media URLs for ${pageUrl}:`, error.message);
-  }
-}
+  return new Promise((resolve, reject) => {
+    console.log(`Saving media URLs for page: ${pageUrl}`);
+    // return  if there is not mkv file in mediaUrls
+    if (!mediaUrls.some(({ url }) => url.endsWith(".mkv"))) return resolve();
+    // delete media url that ends with logo40.png
+    mediaUrls = mediaUrls.filter(({ url }) => !url.endsWith("logo40.png"));
+    const pageName = pageUrl.split("/").pop().replace(/-/g, " "); // Replace '-' with spaces
+    db.serialize(() => {
+      db.run(
+        "INSERT OR IGNORE INTO pages (name) VALUES (?)",
+        [pageName],
+        function (err) {
+          if (err) return reject(err);
 
+          const pageId = this.lastID;
+          const stmt = db.prepare(`
+            INSERT INTO media (page_id, url, type, season, episode, resolution)
+            VALUES (?, ?, ?, ?, ?, ?)
+          `);
+
+          mediaUrls.forEach(({ url, type }) => {
+            const { season, episode } = extractSeasonAndEpisode(url);
+            const resolution = extractResolution(url);
+            console.log({ season, episode, resolution, url, type });
+            stmt.run(
+              pageId,
+              url,
+              type,
+              season || null,
+              episode || null,
+              resolution || null
+            );
+          });
+
+          stmt.finalize((err) => {
+            if (err) return reject(err);
+            console.log(
+              `Saved ${mediaUrls.length} media URLs for page: ${pageName}`
+            );
+            resolve();
+          });
+        }
+      );
+    });
+  });
+}
+// Add this function near your media patterns
+const extractSeasonAndEpisode = (url) => {
+  let season = "01"; // Default season
+  let episode = null;
+
+  // 1. Extract filename from URL
+  const filename = decodeURIComponent(url)
+    .split("/")
+    .pop() // Get last path segment
+    .split("?")[0]; // Remove query parameters
+
+  // 2. Prioritize filename-based season detection
+  const filenameSeasonMatch = filename.match(/[Ss](?:eason)?[\s\._-]?(\d+)/i);
+  if (filenameSeasonMatch) {
+    season = filenameSeasonMatch[1].padStart(2, "0");
+  }
+
+  // 3. Episode extraction with multiple fallbacks
+  const episodeMatch = filename.match(
+    /(?:[Ee](?:pisode)?[\s\._-]?(\d+)|(\d+)(?:\.\d{3,4}p)|x(\d+))/i
+  );
+
+  episode = [1, 2, 3]
+    .reduce(
+      (acc, idx) => acc || episodeMatch?.[idx]?.replace(/\D/g, "") || null,
+      null
+    )
+    ?.padStart(2, "0");
+
+  // 4. Path-based season fallback
+  if (!filenameSeasonMatch) {
+    const pathSeasonMatch = url.match(/\/S(\d+)\//i);
+    if (pathSeasonMatch) season = pathSeasonMatch[1].padStart(2, "0");
+  }
+
+  // 5. Final validation
+  return {
+    season: season.length === 2 ? season : "01",
+    episode: episode?.length <= 3 ? episode : null,
+  };
+};
+
+const extractResolution = (url) => {
+  const resMatch = url.match(/(\d{3,4})(?:p|P)/);
+  return resMatch ? `${resMatch[1]}P` : null;
+};
 async function crawl() {
   const browser = await puppeteer.launch({ headless: "new" });
 
@@ -101,6 +237,7 @@ async function crawl() {
     clearTimeout(saveTimeout);
     await saveState();
     await browser.close();
+    db.close();
     process.exit();
   });
 
@@ -186,7 +323,10 @@ async function crawl() {
         console.log("Videos:", result.videos);
 
         // Save media URLs for this page
-        const allMediaUrls = [...result.images, ...result.videos];
+        const allMediaUrls = [
+          ...result.images.map((url) => ({ url, type: "image" })),
+          ...result.videos.map((url) => ({ url, type: "video" })),
+        ];
         await savePageMediaUrls(url, allMediaUrls);
 
         // Add new links to queue
@@ -217,7 +357,7 @@ async function crawl() {
 
 // Initialization
 async function main() {
-  await ensureMediaDir(); // Ensure media directory exists
+  await ensureMediaDir(); // Ensure database directory exists
   await loadState(); // Load saved state
 
   const startUrl = new URL(START_URL);
