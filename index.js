@@ -220,8 +220,14 @@ const extractResolution = (url) => {
   return resMatch ? `${resMatch[1]}P` : null;
 };
 async function crawl() {
-  const browser = await puppeteer.launch({ headless: "new" });
-
+  const browser = await puppeteer.launch({
+    headless: "new", // Use the new headless mode
+    args: [
+      "--no-sandbox", // Required for Linux
+      "--disable-setuid-sandbox", // Required for Linux
+      "--disable-dev-shm-usage", // Avoids memory issues
+    ],
+  });
   // Setup periodic saving
   const scheduleSave = () => {
     saveTimeout = setTimeout(async () => {
