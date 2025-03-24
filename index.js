@@ -222,7 +222,7 @@ const extractResolution = (url) => {
 };
 async function crawl() {
   const browser = await puppeteer.launch({
-    //executablePath: process.env.CHROME_PATH || "/usr/bin/chromium",
+    executablePath: process.env.CHROME_PATH || undefined,
 
     headless: "new", // Use the new headless mode
     args: [
