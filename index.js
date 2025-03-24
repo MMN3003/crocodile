@@ -44,7 +44,8 @@ function initializeDatabase() {
       `
       CREATE TABLE IF NOT EXISTS pages (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT NOT NULL UNIQUE
+        name TEXT NOT NULL UNIQUE,
+        url TEXT 
       )
     `,
       (result, err) => {
@@ -136,8 +137,8 @@ async function savePageMediaUrls(pageUrl, mediaUrls) {
     const pageName = pageUrl.split("/").pop().replace(/-/g, " "); // Replace '-' with spaces
     db.serialize(() => {
       db.run(
-        "INSERT OR IGNORE INTO pages (name) VALUES (?)",
-        [pageName],
+        "INSERT OR IGNORE INTO pages (name,url) VALUES (?,?)",
+        [pageName, pageUrl],
         function (err) {
           if (err) return reject(err);
 
@@ -221,7 +222,7 @@ const extractResolution = (url) => {
 };
 async function crawl() {
   const browser = await puppeteer.launch({
-    executablePath: process.env.CHROME_PATH || "/usr/bin/chromium",
+    //executablePath: process.env.CHROME_PATH || "/usr/bin/chromium",
 
     headless: "new", // Use the new headless mode
     args: [
